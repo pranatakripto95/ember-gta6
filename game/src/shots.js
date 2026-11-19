@@ -1,79 +1,93 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Ember Vice — shots.js
+// One job: the four deterministic screenshot scenes behind ?shot=drive|street|
+// chase|marina. Each one poses the real game (a real car, real police, a real
+// mission) and then plays it forward a few seconds with a scripted driver, so
+// the frame is what playing really looks like — and the same seed always
+// gives the same frame.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+export function stageShot(game, name) {
+  const g = game;
+  const P = g.player;
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
+  function driveFor(seconds, steerFn) {
+    const steps = Math.round(seconds * 60);
+    for (let i = 0; i < steps; i += 1) {
+      const input = { keys: { up: true, down: false, left: false, right: false }, pressed: {}, mouseDX: 0, mouseDY: 0, endFrame() {} };
+      if (steerFn) steerFn(input, i / 60);
+      g.step(1 / 60, input);
     }
   }
-  return Infinity;
-}
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
+  function walkFor(seconds) {
+    const steps = Math.round(seconds * 60);
+    for (let i = 0; i < steps; i += 1) {
+      g.step(1 / 60, { keys: {}, pressed: {}, mouseDX: 0, mouseDY: 0, endFrame() {} });
     }
   }
-  return best;
-}
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+  if (name === 'street') {
+    // On foot south of The Rusty Anchor: the gold ring close ahead, the bar
+    // and its sign ahead-right, the avenue's traffic crossing the frame.
+    g.setPlayerPos(-48, -70, -0.88);
+    P.camYaw = -0.88;
+    P.camPitch = 0.26;
+    g.missions.start(g);
+    walkFor(3);
+    return;
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+
+  if (name === 'chase') {
+    // Three stars, police on the tail, the Big Score escape running.
+    // The car starts ON the avenue (x = 60, right-hand lane) heading north,
+    // so the drive stays on the road and the cop cars can close in behind.
+    g.setPlayerPos(62.8, -140, 0);
+    const car = g.traffic.comet; // the red Comet GT, the getaway car
+    car.x = 62.8; car.z = -140; car.heading = 0; car.speed = 18;
+    g.putPlayerInCar(car);
+    g.missions.restore({ index: 4, completed: 4, allDone: false });
+    g.missions.start(g);
+    g.missions.active.stage = 'escape';
+    g.police.setHeat(130, g);
+    driveFor(5, (input, t) => {
+      // Stay in the avenue's northbound lane (x = 62.8).
+      const c = g.playerCar;
+      if (c) {
+        const err = 62.8 - c.x;
+        if (err > 1.5) input.keys.right = true;
+        if (err < -1.5) input.keys.left = true;
+      }
+    });
+    return;
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+
+  if (name === 'marina') {
+    // Dockside Heat: four Vultures at the marina, Dario on foot close in,
+    // pistol out, the gold ring and the MARINA sign in frame.
+    g.setPlayerPos(212, 50, Math.PI * 0.5);
+    P.camYaw = Math.PI * 0.5;
+    P.camPitch = 0.28;
+    g.missions.restore({ index: 3, completed: 3, allDone: false });
+    g.missions.start(g);
+    walkFor(2.5);
+    return;
+  }
+
+  // Default: 'drive' — the cover. Cruising downtown in a sports car with
+  // two stars, a cop car closing in, the Package Run on the HUD.
+  // The car starts ON the avenue (x = 0, right-hand lane) heading north.
+  g.setPlayerPos(2.8, -140, 0);
+  const car = g.traffic.parked.find((c) => c.kind === 'sport') || g.traffic.parked[0];
+  car.x = 2.8; car.z = -140; car.heading = 0; car.speed = 12;
+  g.putPlayerInCar(car);
+  g.missions.restore({ index: 1, completed: 1, allDone: false });
+  g.missions.start(g);
+  g.police.setHeat(70, g);
+  driveFor(4, (input) => {
+    const c = g.playerCar;
+    if (c) {
+      const err = 2.8 - c.x; // ride the avenue's northbound lane
+      if (err > 1.5) input.keys.right = true;
+      if (err < -1.5) input.keys.left = true;
+    }
+  });
 }
